@@ -135,6 +135,7 @@ class Container:
         self.lxd = lxd
         self.lxc = None
         self.ips = None
+        self.workdir = None
         self.name = data['name']
         self.description = data['description']
         self.box = data['box']
@@ -278,6 +279,8 @@ class Container:
     def exec(self, code: str = None) -> int:
         cmd = []
         if code is not None:
+            if self.workdir:
+                code = f'cd {self.workdir}; {code}'
             cmd = ['-c', code]
         return subprocess.call(['lxc', 'exec', self.id, '--', 'sudo', '--login', '--user', self.user, self.shell] + cmd)
 
@@ -339,12 +342,16 @@ class Container:
 
 
 class SpecialAction:
+    def __init__(self, node: Union[ScalarNode, list]):
+        pass
+
     def call(self, container: Container, loader: ContainerLoader):
         pass
 
 
 class Rpc(SpecialAction):
     def __init__(self, node: Union[ScalarNode, list]):
+        super().__init__(node)
         value = node.value.split(' ') if type(node) == ScalarNode else node
         parameters = [f for f in filter(lambda a: a != '', value)]
         self.container = parameters.pop(0)
@@ -363,6 +370,7 @@ class Rpc(SpecialAction):
 
 class DumpFile(SpecialAction):
     def __init__(self, node: Union[ScalarNode, list]):
+        super().__init__(node)
         self.filename = node.value if type(node) == ScalarNode else node
 
     def call(self, container: Container, loader: ContainerLoader):
@@ -375,8 +383,18 @@ class DumpFile(SpecialAction):
         container.exec(f'sudo chown {container.user}:{container.user} {self.filename}')
 
 
+class SetWorkdir(SpecialAction):
+    def __init__(self, node: Union[ScalarNode, list]):
+        super().__init__(node)
+        self.workdir = node.value if type(node) == ScalarNode else node
+
+    def call(self, container: Container, loader: ContainerLoader):
+        container.workdir = self.workdir
+
+
 yaml.add_constructor('!rpc', lambda loader, node: Rpc(node), Loader=SafeLoader)
 yaml.add_constructor('!df', lambda loader, node: DumpFile(node), Loader=SafeLoader)
+yaml.add_constructor('!cwd', lambda loader, node: SetWorkdir(node), Loader=SafeLoader)
 
 
 def main():
