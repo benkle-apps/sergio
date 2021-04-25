@@ -5,18 +5,21 @@ from __future__ import annotations
 import argparse
 import os
 import subprocess
-import sys
 import time
 
 import pylxd.models
 import yaml
-import shlex
-import re
 
 from string import Template
 from pylxd import Client
 from yaml import ScalarNode
 from typing import Union
+
+
+def defaulting(obj: dict, key: str, default=None):
+    if key in obj and obj[key] is not None:
+        return obj[key]
+    return default
 
 
 class Templating:
@@ -79,7 +82,7 @@ class Port:
         self.protocol = data['protocol']
         self.from_port = data['from']
         self.to_port = data['to']
-        self.comment = data['comment'] if 'comment' in data else container.name
+        self.comment = defaulting(data, 'comment', container.name)
 
     def delete(self):
         check = subprocess.check_output(['sudo', '-S', 'iptables', '-L', '-n', '-t', 'nat', '--line-numbers']) \
@@ -121,8 +124,8 @@ class Mountpoint:
 
 
 class Container:
-    def __init__(self, id: str, data: dict, loader: ContainerLoader, lxd: Client):
-        self.id = id
+    def __init__(self, cid: str, data: dict, loader: ContainerLoader, lxd: Client):
+        self.id = cid
         self.loader = loader
         self.lxd = lxd
         self.lxc = None
@@ -132,13 +135,59 @@ class Container:
         self.box = data['box']
         self.mountpoints = map(
             lambda mp: Mountpoint(mp[0], mp[1], self),
-            (data['mountpoints'] if 'mountpoints' in data else {}).items()
+            defaulting(data, 'mountpoints', {}).items()
         )
-        self.ports = map(lambda port: Port(port, self), data['ports'] if 'ports' in data else [])
-        self.requires = data['requires'] if 'requires' in data else []
-        self.actions = data['actions'] if 'actions' in data else []
-        self.variables = data['variables'] if 'variables' in data else {}
-        self.files = data['files'] if 'files' in data else {}
+        self.ports = map(lambda port: Port(port, self), defaulting(data, 'ports', []))
+        self.requires = defaulting(data, 'requires', [])
+        self.actions = defaulting(data, 'actions', [])
+        self.variables = defaulting(data, 'variables', {})
+        self.files = defaulting(data, 'files', {})
+        self.shell = defaulting(data, 'shell', '/bin/sh')
+
+    def check_requirements(self, ignore_stopped: bool = False):
+        okay = True
+        for requirement in self.requires:
+            requirement = self.loader.get(requirement)
+            if not requirement.exists():
+                self.log(f'Requires {requirement.name} ({requirement.id}), but it does not exist')
+                okay = False
+            elif not ignore_stopped and not requirement.is_running():
+                self.log(f'Requires {requirement.name} ({requirement.id}), but it is not running')
+                okay = False
+        return okay
+
+    def is_running(self) -> bool:
+        return self.get_lxc().status == 'Running'
+
+    def exists(self):
+        return self.lxd.containers.exists(self.id)
+
+    def get_launch_order(self):
+        containers = {}
+        launch_order = []
+        for requirement in self.requires:
+            requirement = self.loader.get(requirement)
+            containers[requirement.id] = requirement.requires
+        changes = True
+        while changes:
+            changes = False
+            for container, requirements in list(containers.items()):
+                for requirement in requirements:
+                    if requirement not in containers:
+                        requirement = self.loader.get(requirement)
+                        containers[requirement.id] = requirement.requires
+                        changes = True
+        while containers:
+            launchables = [container for container, requirements in containers.items() if [] == requirements]
+            if not launchables:
+                raise Exception('Unresolvable requirements')
+            launchable = launchables.pop(0)
+            launch_order.append(launchable)
+            del containers[launchable]
+            for container, requirements in containers.items():
+                if launchable in requirements:
+                    requirements.remove(launchable)
+        return launch_order
 
     def log(self, message: str):
         print(f'[{self.name}] {message}')
@@ -152,35 +201,48 @@ class Container:
 
     def create(self):
         self.log(f'Create new container {self.id} from {self.box}')
-        if 0 == subprocess.call(['lxc', 'launch', self.box, self.id, '-v']):
+        if not self.check_requirements():
+            self.log('Requirements not met')
+        elif 0 == subprocess.call(['lxc', 'launch', self.box, self.id, '-v']):
             self.mount()
             self.log('Waiting for network to calm down')
             time.sleep(5)
+            self.nat()
             self.execute_action('create')
+            self.execute_action('up')
             self.log('Done')
         else:
             self.log(f'Creation failed')
 
     def destroy(self):
-        if self.get_lxc().status == 'Running':
+        if self.is_running():
             self.execute_action('down')
             self.denat()
             self.get_lxc().stop(wait=True)
         self.execute_action('destroy')
         subprocess.call(['lxc', 'delete', self.id, '-f'])
 
-    def up(self):
-        if self.get_lxc().status != 'Running':
+    def up(self, recursive: bool):
+        if self.is_running():
+            self.log('Already running')
+        elif not self.check_requirements(recursive):
+            self.log('Requirements not met')
+        else:
+            if recursive:
+                for requirement in self.get_launch_order():
+                    container = self.loader.get(requirement)
+                    if not container.is_running():
+                        container.up(False)
             self.log('Starting...')
             self.get_lxc().start(wait=True)
+            self.log('Waiting for network to calm down')
+            time.sleep(5)
             self.nat()
             self.execute_action('up')
             self.log('Done')
-        else:
-            self.log('Already running')
 
     def down(self):
-        if self.get_lxc().status == 'Running':
+        if self.is_running():
             self.log('Stopping...')
             self.execute_action('down')
             self.denat()
@@ -190,6 +252,9 @@ class Container:
             self.log('Is not running')
 
     def nat(self):
+        if not self.is_running():
+            self.log('Container not running, not NAT needed')
+            return
         for port in self.ports:
             self.log(f'Forwarding {port.to_port} to {port.get_ip()}:{port.from_port} ({port.device})')
             port.delete()
@@ -209,7 +274,7 @@ class Container:
             if type(line) == str:
                 line = self.loader.templating.apply(line, self.variables, parameters)
                 self.log(line)
-                if 0 != subprocess.call(['lxc', 'exec', self.id, '--', 'sh', '-c', line]):
+                if 0 != subprocess.call(['lxc', 'exec', self.id, '--', self.shell, '-c', line]):
                     self.log('Execution failed')
                     return
             if isinstance(line, SpecialAction):
@@ -221,7 +286,7 @@ class Container:
         self.ips = {}
         for dev, configs in self.get_lxc().state().network.items():
             self.ips[dev] = [c['address'] for c in filter(lambda c: 'inet' == c['family'], configs['addresses'])][0]
-        return self.ips[dev]
+        return self.ips[device]
 
     def get_lxc(self) -> pylxd.models.Container:
         if not self.lxc:
@@ -275,7 +340,9 @@ def main():
     parser.add_argument('verb', metavar='VERB', type=str, help='Operation to perform')
     parser.add_argument('parameters', metavar='PARAMS', type=str, help='Parameters for the operation', nargs="*")
     parser.add_argument('-d', metavar='DIR', type=str, dest='definitions_dir', help='Definitions directory')
-    parser.add_argument('-v', metavar='FILE', type=str, dest='variables_file', help='YAML file with variable values', default=None)
+    parser.add_argument('-v', metavar='FILE', type=str, dest='variables_file', help='YAML file with variable values',
+                        default=None)
+    parser.add_argument('-r', type=bool, dest='recursive', help='Start containers recursively', default=False)
 
     args = parser.parse_args()
 
@@ -287,7 +354,7 @@ def main():
     elif 'destroy' == args.verb:
         container.destroy()
     elif 'up' == args.verb:
-        container.up()
+        container.up(args.recursive)
     elif 'down' == args.verb:
         container.down()
     elif 'nat' == args.verb:
