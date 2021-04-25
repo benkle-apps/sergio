@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import time
 import datetime
@@ -290,8 +291,7 @@ class Container:
                 line = self.loader.templating.apply(line, self.variables, parameters)
                 self.log(line)
                 if 0 != self.exec(line):
-                    self.log('Execution failed')
-                    return
+                    raise Exception('Execution failed')
             if isinstance(line, SpecialAction):
                 line.call(self, self.loader)
 
@@ -313,6 +313,29 @@ class Container:
             self.log('Not running')
         else:
             self.exec()
+
+    def backup(self):
+        if not self.is_running():
+            self.log('Not running')
+        else:
+            self.execute_action('backup')
+            date = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            backup_file = os.path.join(self.loader.backup_dir, f'{self.id}_{date}.zip')
+            with open(backup_file, 'wb+') as f:
+                f.write(self.get_lxc().files.get('/tmp/backup.zip'))
+            self.get_lxc().files.delete('/tmp/backup.zip')
+
+    def restore(self):
+        if not self.is_running():
+            self.log('Not running')
+        else:
+            backups = sorted([file for file in os.listdir(self.loader.backup_dir)
+                              if re.match(self.id + '_[0-9]{4}([-_][0-9]{2}){5}.zip', file)])
+            backup_file = os.path.join(self.loader.backup_dir, backups.pop())
+            with open(backup_file, 'rb+') as f:
+                self.get_lxc().files.put('/tmp/backup.zip', f.read(), mode=0o777)
+            self.execute_action('restore')
+            self.get_lxc().files.delete('/tmp/backup.zip')
 
 
 class SpecialAction:
@@ -407,6 +430,10 @@ def main():
         container.denat()
     elif 'login' == args.verb:
         container.login()
+    elif 'backup' == args.verb:
+        container.backup()
+    elif 'restore' == args.verb:
+        container.restore()
     elif 'exec' == args.verb:
         call = Rpc([container.id] + args.parameters)
         call.call(container, loader)
