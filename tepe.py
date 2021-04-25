@@ -6,13 +6,13 @@ import argparse
 import os
 import subprocess
 import time
-
-import pylxd.models
+import datetime
 import yaml
 
 from string import Template
 from pylxd import Client
-from yaml import ScalarNode
+from pylxd.models import Container as LxdContainer
+from yaml import ScalarNode, SafeLoader
 from typing import Union
 
 
@@ -20,6 +20,12 @@ def defaulting(obj: dict, key: str, default=None):
     if key in obj and obj[key] is not None:
         return obj[key]
     return default
+
+
+def relate_path(base: str, path: str) -> str:
+    if not os.path.isabs(path):
+        path = os.path.abspath(os.path.join(base, path))
+    return path
 
 
 class Templating:
@@ -37,16 +43,14 @@ class Templating:
 
 
 class ContainerLoader:
-    def __init__(self, definitions_dir: str, lxd: Client, variables_path: str = None):
-        self.definitions_dir = definitions_dir
+    def __init__(self, config_file: str, lxd: Client):
+        with open(config_file, 'r+') as f:
+            config = yaml.safe_load(f)
+        self.definitions_dir = relate_path(os.path.dirname(config_file), config['definitions'])
         self.container = {}
         self.lxd = lxd
-        if variables_path is not None and os.path.isfile(variables_path):
-            with open(variables_path, 'r+') as f:
-                variables = yaml.full_load(f)['variables']
-        else:
-            variables = {}
-        self.templating = Templating(variables)
+        self.templating = Templating(defaulting(config, 'variables', {}))
+        self.backup_dir = relate_path(os.path.dirname(config_file), config['backups'])
 
     def list(self) -> list:
         result = []
@@ -67,7 +71,7 @@ class ContainerLoader:
             return self.container[container_id]
         path = self.path(container_id)
         with open(path, 'r+') as f:
-            data = yaml.full_load(f)
+            data = yaml.safe_load(f)
         self.container[container_id] = Container(container_id, data['container'], loader=self, lxd=self.lxd)
         return self.container[container_id]
 
@@ -299,7 +303,7 @@ class Container:
             self.ips[dev] = [c['address'] for c in filter(lambda c: 'inet' == c['family'], configs['addresses'])][0]
         return self.ips[device]
 
-    def get_lxc(self) -> pylxd.models.Container:
+    def get_lxc(self) -> LxdContainer:
         if not self.lxc:
             self.lxc = self.lxd.containers.get(self.id)
         return self.lxc
@@ -348,23 +352,45 @@ class DumpFile(SpecialAction):
         container.exec(f'sudo chown {container.user}:{container.user} {self.filename}')
 
 
-yaml.add_constructor('!rpc', lambda loader, node: Rpc(node))
-yaml.add_constructor('!df', lambda loader, node: DumpFile(node))
+yaml.add_constructor('!rpc', lambda loader, node: Rpc(node), Loader=SafeLoader)
+yaml.add_constructor('!df', lambda loader, node: DumpFile(node), Loader=SafeLoader)
 
 
 def main():
+
+    possible_configs = [
+        os.path.join(os.getcwd(), 'config.yml'),
+        os.path.join(os.getcwd(), 'config.yaml'),
+        os.path.join(os.path.expanduser('~'), 'config.yml'),
+        os.path.join(os.path.expanduser('~'), 'config.yaml'),
+    ]
+
     parser = argparse.ArgumentParser(description='Manager/Provisioner for LXD')
-    parser.add_argument('container', metavar='CONTAINER', type=str, help='Container to work on')
-    parser.add_argument('verb', metavar='VERB', type=str, help='Operation to perform')
-    parser.add_argument('parameters', metavar='PARAMS', type=str, help='Parameters for the operation', nargs="*")
-    parser.add_argument('-d', metavar='DIR', type=str, dest='definitions_dir', help='Definitions directory')
-    parser.add_argument('-v', metavar='FILE', type=str, dest='variables_file', help='YAML file with variable values',
-                        default=None)
-    parser.add_argument('-r', type=bool, dest='recursive', help='Start containers recursively', default=False)
+    parser.add_argument('container',
+                        metavar='CONTAINER', type=str,
+                        help='Container to work on')
+    parser.add_argument('verb',
+                        metavar='VERB', type=str,
+                        help='Operation to perform')
+    parser.add_argument('parameters',
+                        metavar='PARAMS', type=str, nargs="*",
+                        help='Parameters for the operation')
+    parser.add_argument('-c', '--config',
+                        metavar='CONFIG', type=str, default=None,
+                        help='Load a different config file')
+    parser.add_argument('-r', '--recursive',
+                        default=False, action='store_const', const=True,
+                        help='Start containers recursively')
 
     args = parser.parse_args()
 
-    loader = ContainerLoader(os.path.abspath(args.definitions_dir), Client(), os.path.abspath(args.variables_file))
+    if args.config is None:
+        for possible_config in possible_configs:
+            if os.path.exists(possible_config):
+                args.config = possible_config
+                break
+
+    loader = ContainerLoader(os.path.abspath(args.config), Client())
     container = loader.get(args.container)
 
     if 'create' == args.verb:
