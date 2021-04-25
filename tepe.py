@@ -5,8 +5,13 @@ from __future__ import annotations
 import argparse
 import os
 import subprocess
+import sys
+import time
+
+import pylxd.models
 import yaml
 import shlex
+import re
 
 from string import Template
 from pylxd import Client
@@ -14,24 +19,44 @@ from yaml import ScalarNode
 from typing import Union
 
 
+class Templating:
+    def __init__(self, variables: dict):
+        self.variables = variables
+
+    def apply(self, template: str, container_variables: dict = None, rpc_variables: dict = None) -> str:
+        if container_variables is None:
+            container_variables = {}
+        variables = {**container_variables, **self.variables}
+        if rpc_variables is not None:
+            variables = {**variables, **rpc_variables}
+        t = Template(template)
+        return t.safe_substitute(variables)
+
+
 class ContainerLoader:
-    def __init__(self, definitions_dir: str, lxd: Client):
-        self._definitions_dir = os.path.abspath(definitions_dir)
+    def __init__(self, definitions_dir: str, lxd: Client, variables_path: str = None):
+        self.definitions_dir = definitions_dir
         self.container = {}
         self.lxd = lxd
+        if variables_path is not None and os.path.isfile(variables_path):
+            with open(variables_path, 'r+') as f:
+                variables = yaml.full_load(f)['variables']
+        else:
+            variables = {}
+        self.templating = Templating(variables)
 
     def list(self) -> list:
         result = []
-        for file in os.listdir(self._definitions_dir):
+        for file in os.listdir(self.definitions_dir):
             if not file.endswith('.yml') and not file.endswith('.yaml'):
                 continue
             result.append(file.replace('.yaml', '').replace('.yml', ''))
         return result
 
     def path(self, container_id: str) -> str:
-        path = os.path.join(self._definitions_dir, f'{container_id}.yaml')
+        path = os.path.join(self.definitions_dir, f'{container_id}.yaml')
         if not os.path.exists(path):
-            path = os.path.join(self._definitions_dir, f'{container_id}.yml')
+            path = os.path.join(self.definitions_dir, f'{container_id}.yml')
         return path
 
     def get(self, container_id: str) -> Container:
@@ -48,16 +73,16 @@ class ContainerLoader:
 
 
 class Port:
-    def __init__(self, port_data: dict, container: Container):
+    def __init__(self, data: dict, container: Container):
         self.container = container
-        self.device = port_data['device']
-        self.protocol = port_data['protocol']
-        self.from_port = port_data['from']
-        self.to_port = port_data['to']
-        self.comment = port_data['comment'] if 'comment' in port_data else container.name
+        self.device = data['device']
+        self.protocol = data['protocol']
+        self.from_port = data['from']
+        self.to_port = data['to']
+        self.comment = data['comment'] if 'comment' in data else container.name
 
     def delete(self):
-        check = subprocess.check_output(['sudo', '-S', 'iptables', '-L', '-n', '-t', 'nat', '--line-numbers'])\
+        check = subprocess.check_output(['sudo', '-S', 'iptables', '-L', '-n', '-t', 'nat', '--line-numbers']) \
             .split(b'\n')
         existing_rules = [line.split(b' ')[0] for line in check if f'dpt:{self.to_port}' in str(line)]
         existing_rules.reverse()
@@ -76,6 +101,25 @@ class Port:
         return self.container.get_ip(self.device)
 
 
+class Mountpoint:
+    def __init__(self, name: str, data: dict, container: Container):
+        self.container = container
+        self.name = name
+        self.source = data['source']
+        self.path = data['path']
+
+    def mount(self):
+        if not self.is_mounted():
+            self.container.get_lxc().devices[self.name] = {
+                'path': self.path,
+                'source': self.source,
+                'type': 'disk',
+            }
+
+    def is_mounted(self) -> bool:
+        return self.name in self.container.get_lxc().devices
+
+
 class Container:
     def __init__(self, id: str, data: dict, loader: ContainerLoader, lxd: Client):
         self.id = id
@@ -86,19 +130,36 @@ class Container:
         self.name = data['name']
         self.description = data['description']
         self.box = data['box']
-        self.mountpoints = data['mountpoints'] if 'mountpoints' in data else []
+        self.mountpoints = map(
+            lambda mp: Mountpoint(mp[0], mp[1], self),
+            (data['mountpoints'] if 'mountpoints' in data else {}).items()
+        )
         self.ports = map(lambda port: Port(port, self), data['ports'] if 'ports' in data else [])
         self.requires = data['requires'] if 'requires' in data else []
         self.actions = data['actions'] if 'actions' in data else []
         self.variables = data['variables'] if 'variables' in data else {}
         self.files = data['files'] if 'files' in data else {}
 
+    def log(self, message: str):
+        print(f'[{self.name}] {message}')
+
+    def mount(self):
+        for mountpoint in self.mountpoints:
+            if not mountpoint.is_mounted():
+                self.log(f'Mounting {mountpoint.name}')
+                mountpoint.mount()
+        self.get_lxc().save()
+
     def create(self):
-        print(f'[{self.name}] Create new container {self.id} from {self.box}')
+        self.log(f'Create new container {self.id} from {self.box}')
         if 0 == subprocess.call(['lxc', 'launch', self.box, self.id, '-v']):
+            self.mount()
+            self.log('Waiting for network to calm down')
+            time.sleep(5)
             self.execute_action('create')
+            self.log('Done')
         else:
-            print(f'[{self.name}] Creation failed')
+            self.log(f'Creation failed')
 
     def destroy(self):
         if self.get_lxc().status == 'Running':
@@ -110,42 +171,46 @@ class Container:
 
     def up(self):
         if self.get_lxc().status != 'Running':
-            print(f'[{self.name}] Starting...')
+            self.log('Starting...')
             self.get_lxc().start(wait=True)
             self.nat()
             self.execute_action('up')
-            print(f'[{self.name}] Done')
+            self.log('Done')
         else:
-            print(f'[{self.name}] Already running')
+            self.log('Already running')
 
     def down(self):
         if self.get_lxc().status == 'Running':
-            print(f'[{self.name}] Stopping...')
+            self.log('Stopping...')
             self.execute_action('down')
             self.denat()
             self.get_lxc().stop(wait=True)
-            print(f'[{self.name}] Done')
+            self.log('Done')
         else:
-            print(f'[{self.name}] Is not running')
+            self.log('Is not running')
 
     def nat(self):
         for port in self.ports:
-            print(f'[{self.name}] Forwarding {port.to_port} to {port.get_ip()}:{port.from_port} ({port.device})')
+            self.log(f'Forwarding {port.to_port} to {port.get_ip()}:{port.from_port} ({port.device})')
             port.delete()
             port.create()
 
     def denat(self):
         for port in self.ports:
-            print(f'[{self.name}] Removing forward from {port.to_port} to {port.get_ip()}:{port.from_port} ({port.device})')
+            self.log(f'Removing forward from {port.to_port} to {port.get_ip()}:{port.from_port} ({port.device})')
             port.delete()
 
     def execute_action(self, action: str, parameters: dict = {}):
+        if action not in self.actions:
+            self.log(f'Action "{action}" does not exist')
+            return
+        self.log(f'Execute action "{action}"')
         for line in self.actions[action]:
             if type(line) == str:
-                line = line.format(**parameters)
-                print(f'[{self.name}] {line}')
-                if 0 != subprocess.call(['lxc', 'exec', self.id, '--'] + shlex.split(line)):
-                    print(f'[{self.name}] Execution failed')
+                line = self.loader.templating.apply(line, self.variables, parameters)
+                self.log(line)
+                if 0 != subprocess.call(['lxc', 'exec', self.id, '--', 'sh', '-c', line]):
+                    self.log('Execution failed')
                     return
             if isinstance(line, SpecialAction):
                 line.call(self, self.loader)
@@ -158,7 +223,7 @@ class Container:
             self.ips[dev] = [c['address'] for c in filter(lambda c: 'inet' == c['family'], configs['addresses'])][0]
         return self.ips[dev]
 
-    def get_lxc(self):
+    def get_lxc(self) -> pylxd.models.Container:
         if not self.lxc:
             self.lxc = self.lxd.containers.get(self.id)
         return self.lxc
@@ -183,19 +248,21 @@ class Rpc(SpecialAction):
         target = loader.get(self.container)
         parameters = {}
         for parameter, value in self.parameters.items():
-            parameters[parameter] = Template(value).safe_substitute(container.variables)
+            parameters[parameter] = loader.templating.apply(value, container.variables)
         target.execute_action(self.action, parameters)
 
 
 class DumpFile(SpecialAction):
-    def __init__(self, node: Union[ScalarNode. list]):
+    def __init__(self, node: Union[ScalarNode, list]):
         self.filename = node.value if type(node) == ScalarNode else node
 
     def call(self, container: Container, loader: ContainerLoader):
-        print(f'[{container.name}] Dropping file {self.filename}')
+        container.log(f'Dropping file {self.filename}')
         container.get_lxc().execute(['mkdir', '-p', os.path.dirname(self.filename)])
-        t = Template(container.files[self.filename]).safe_substitute(container.variables)
-        container.get_lxc().files.put(self.filename, t)
+        container.get_lxc().files.put(
+            self.filename,
+            loader.templating.apply(container.files[self.filename], container.variables)
+        )
 
 
 yaml.add_constructor('!rpc', lambda loader, node: Rpc(node))
@@ -204,14 +271,15 @@ yaml.add_constructor('!df', lambda loader, node: DumpFile(node))
 
 def main():
     parser = argparse.ArgumentParser(description='Manager/Provisioner for LXD')
-    parser.add_argument('verb', metavar='VERB', type=str, help='Operation to perform')
     parser.add_argument('container', metavar='CONTAINER', type=str, help='Container to work on')
+    parser.add_argument('verb', metavar='VERB', type=str, help='Operation to perform')
     parser.add_argument('parameters', metavar='PARAMS', type=str, help='Parameters for the operation', nargs="*")
     parser.add_argument('-d', metavar='DIR', type=str, dest='definitions_dir', help='Definitions directory')
+    parser.add_argument('-v', metavar='FILE', type=str, dest='variables_file', help='YAML file with variable values', default=None)
 
     args = parser.parse_args()
 
-    loader = ContainerLoader(args.definitions_dir, Client())
+    loader = ContainerLoader(os.path.abspath(args.definitions_dir), Client(), os.path.abspath(args.variables_file))
     container = loader.get(args.container)
 
     if 'create' == args.verb:
@@ -228,6 +296,9 @@ def main():
         container.denat()
     elif 'exec' == args.verb:
         call = Rpc([container.id] + args.parameters)
+        call.call(container, loader)
+    else:
+        call = Rpc([container.id] + [args.verb] + args.parameters)
         call.call(container, loader)
 
 
