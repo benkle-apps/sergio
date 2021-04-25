@@ -143,6 +143,7 @@ class Container:
         self.variables = defaulting(data, 'variables', {})
         self.files = defaulting(data, 'files', {})
         self.shell = defaulting(data, 'shell', '/bin/sh')
+        self.user = defaulting(data, 'user', 'root')
 
     def check_requirements(self, ignore_stopped: bool = False):
         okay = True
@@ -187,6 +188,10 @@ class Container:
             for container, requirements in containers.items():
                 if launchable in requirements:
                     requirements.remove(launchable)
+        for launchable in launch_order:
+            launchable = self.loader.get(launchable)
+            if not launchable.exists():
+                raise Exception(f'Requires {launchable.name} ({launchable.id}), but it does not exist')
         return launch_order
 
     def log(self, message: str):
@@ -265,6 +270,12 @@ class Container:
             self.log(f'Removing forward from {port.to_port} to {port.get_ip()}:{port.from_port} ({port.device})')
             port.delete()
 
+    def exec(self, code: str = None) -> int:
+        cmd = []
+        if code is not None:
+            cmd = ['-c', code]
+        return subprocess.call(['lxc', 'exec', self.id, '--', 'sudo', '--login', '--user', self.user, self.shell] + cmd)
+
     def execute_action(self, action: str, parameters: dict = {}):
         if action not in self.actions:
             self.log(f'Action "{action}" does not exist')
@@ -274,7 +285,7 @@ class Container:
             if type(line) == str:
                 line = self.loader.templating.apply(line, self.variables, parameters)
                 self.log(line)
-                if 0 != subprocess.call(['lxc', 'exec', self.id, '--', self.shell, '-c', line]):
+                if 0 != self.exec(line):
                     self.log('Execution failed')
                     return
             if isinstance(line, SpecialAction):
@@ -292,6 +303,12 @@ class Container:
         if not self.lxc:
             self.lxc = self.lxd.containers.get(self.id)
         return self.lxc
+
+    def login(self):
+        if not self.is_running():
+            self.log('Not running')
+        else:
+            self.exec()
 
 
 class SpecialAction:
@@ -328,6 +345,7 @@ class DumpFile(SpecialAction):
             self.filename,
             loader.templating.apply(container.files[self.filename], container.variables)
         )
+        container.exec(f'sudo chown {container.user}:{container.user} {self.filename}')
 
 
 yaml.add_constructor('!rpc', lambda loader, node: Rpc(node))
@@ -361,6 +379,8 @@ def main():
         container.nat()
     elif 'denat' == args.verb:
         container.denat()
+    elif 'login' == args.verb:
+        container.login()
     elif 'exec' == args.verb:
         call = Rpc([container.id] + args.parameters)
         call.call(container, loader)
