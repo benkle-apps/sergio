@@ -327,18 +327,31 @@ class Container:
             with open(backup_file, 'wb+') as f:
                 f.write(self.get_lxc().files.get('/tmp/backup.zip'))
             self.get_lxc().files.delete('/tmp/backup.zip')
+            latest_file = os.path.join(self.loader.backup_dir, f'{self.id}_latest.zip')
+            if os.path.exists(latest_file):
+                os.remove(latest_file)
+            os.symlink(os.path.basename(backup_file), latest_file)
 
-    def restore(self):
+    def restore(self, backup_file: str = None):
         if not self.is_running():
             self.log('Not running')
         else:
-            backups = sorted([file for file in os.listdir(self.loader.backup_dir)
-                              if re.match(self.id + '_[0-9]{4}([-_][0-9]{2}){5}.zip', file)])
-            backup_file = os.path.join(self.loader.backup_dir, backups.pop())
-            with open(backup_file, 'rb+') as f:
-                self.get_lxc().files.put('/tmp/backup.zip', f.read(), mode=0o777)
-            self.execute_action('restore')
-            self.get_lxc().files.delete('/tmp/backup.zip')
+            backup_files = [
+                os.path.join(os.getcwd(), backup_file) if backup_file else None,
+                os.path.join(self.loader.backup_dir, backup_file) if backup_file else None,
+                os.path.join(self.loader.backup_dir, f'{self.id}_latest.zip')
+            ] + sorted([
+                os.path.join(self.loader.backup_dir, file)
+                for file in os.listdir(self.loader.backup_dir)
+                if re.match(self.id + '_[0-9]{4}([-_][0-9]{2}){5}.zip', file)
+            ])
+            for backup_file in backup_files:
+                if backup_file is not None and os.path.exists(backup_file):
+                    with open(backup_file, 'rb+') as f:
+                        self.get_lxc().files.put('/tmp/backup.zip', f.read(), mode=0o777)
+                    self.execute_action('restore')
+                    self.get_lxc().files.delete('/tmp/backup.zip')
+                    break
 
 
 class SpecialAction:
@@ -361,7 +374,7 @@ class Rpc(SpecialAction):
             self.parameters[parameter] = value
 
     def call(self, container: Container, loader: ContainerLoader):
-        target = loader.get(self.container)
+        target = loader.get(container.id if 'self' == self.container else self.container)
         parameters = {}
         for parameter, value in self.parameters.items():
             parameters[parameter] = loader.templating.apply(value, container.variables)
@@ -451,7 +464,7 @@ def main():
     elif 'backup' == args.verb:
         container.backup()
     elif 'restore' == args.verb:
-        container.restore()
+        container.restore(args.parameters[0] if args.parameters else None)
     elif 'exec' == args.verb:
         call = Rpc([container.id] + args.parameters)
         call.call(container, loader)
