@@ -328,6 +328,8 @@ class Container:
     def backup(self):
         if not self.is_running():
             self.log('Not running')
+        if 'backup' not in self.actions or self.actions['backup'] is None:
+            self.log('No backup action')
         else:
             self.execute_action('backup')
             date = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
@@ -343,6 +345,8 @@ class Container:
     def restore(self, backup_file: str = None):
         if not self.is_running():
             self.log('Not running')
+        if 'restore' not in self.actions or self.actions['restore'] is None:
+            self.log('No restore action')
         else:
             backup_files = [
                 os.path.join(os.getcwd(), backup_file) if backup_file else None,
