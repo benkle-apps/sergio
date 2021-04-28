@@ -224,20 +224,19 @@ class Container:
             time.sleep(5)
             self.nat()
             self.execute_action('create')
-            self.execute_action('up')
+            self.execute_action('start')
             self.log('Done')
         else:
             self.log(f'Creation failed')
 
     def destroy(self):
         if self.is_running():
-            self.execute_action('down')
+            self.execute_action('stop')
             self.denat()
-            self.get_lxc().stop(wait=True)
         self.execute_action('destroy')
         subprocess.call(['lxc', 'delete', self.id, '-f'])
 
-    def up(self, recursive: bool):
+    def start(self, recursive: bool):
         if self.is_running():
             self.log('Already running')
         elif not self.check_requirements(recursive):
@@ -247,19 +246,19 @@ class Container:
                 for requirement in self.get_launch_order():
                     container = self.loader.get(requirement)
                     if not container.is_running():
-                        container.up(False)
+                        container.start(False)
             self.log('Starting...')
             self.get_lxc().start(wait=True)
             self.log('Waiting for network to calm down')
             time.sleep(5)
             self.nat()
-            self.execute_action('up')
+            self.execute_action('start')
             self.log('Done')
 
-    def down(self):
+    def stop(self):
         if self.is_running():
             self.log('Stopping...')
-            self.execute_action('down')
+            self.execute_action('stop')
             self.denat()
             self.get_lxc().stop(wait=True)
             self.log('Done')
@@ -490,10 +489,10 @@ def main():
         container.create()
     elif 'destroy' == args.verb:
         container.destroy()
-    elif 'up' == args.verb:
-        container.up(args.recursive)
-    elif 'down' == args.verb:
-        container.down()
+    elif 'start' == args.verb:
+        container.start(args.recursive)
+    elif 'stop' == args.verb:
+        container.stop()
     elif 'nat' == args.verb:
         container.nat()
     elif 'denat' == args.verb:
