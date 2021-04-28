@@ -86,7 +86,7 @@ class ContainerLoader:
 class Port:
     def __init__(self, data: dict, container: Container):
         self.container = container
-        self.device = data['device']
+        self.device = data['device'] if 'device' in data else 'eth0'
         self.protocol = data['protocol']
         self.from_port = data['from']
         self.to_port = data['to']
