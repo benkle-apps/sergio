@@ -6,6 +6,7 @@ import argparse
 import os
 import re
 import subprocess
+import sys
 import time
 import datetime
 import yaml
@@ -44,12 +45,14 @@ class Templating:
 
 
 class ContainerLoader:
-    def __init__(self, config_file: str, lxd: Client):
+    def __init__(self, config_file: str, lxd: Client, output, log):
         with open(config_file, 'r+') as f:
             config = yaml.safe_load(f)
         self.definitions_dir = relate_path(os.path.dirname(config_file), config['definitions'])
         self.container = {}
         self.lxd = lxd
+        self.output = output
+        self.log = log
         self.templating = Templating(defaulting(config, 'variables', {}))
         self.backup_dir = relate_path(os.path.dirname(config_file), config['backups'])
 
@@ -201,7 +204,8 @@ class Container:
         return launch_order
 
     def log(self, message: str):
-        print(f'[{self.name}] {message}')
+        if self.loader.log:
+            print(f'[{self.name}] {message}')
 
     def mount(self):
         for mountpoint in self.mountpoints:
@@ -282,7 +286,11 @@ class Container:
             if self.workdir:
                 code = f'cd {self.workdir}; {code}'
             cmd = ['-c', code]
-        return subprocess.call(['lxc', 'exec', self.id, '--', 'sudo', '--login', '--user', self.user, self.shell] + cmd)
+        output = None if self.loader.output else subprocess.DEVNULL
+        return subprocess.call(
+            ['lxc', 'exec', self.id, '--', 'sudo', '--login', '--user', self.user, self.shell] + cmd,
+            stdout=output, stderr=output
+        )
 
     def execute_action(self, action: str, parameters: dict = {}):
         if action not in self.actions:
@@ -429,11 +437,13 @@ def main():
     parser.add_argument('parameters',
                         metavar='PARAMS', type=str, nargs="*",
                         help='Parameters for the operation')
+    parser.add_argument('-o', '--output',
+                        metavar='OUTPUTS', type=str, default='both',
+                        help='Output modes (both, actions, log, none)')
     parser.add_argument('-c', '--config',
                         metavar='CONFIG', type=str, default=None,
                         help='Load a different config file')
-    parser.add_argument('-r', '--recursive',
-                        default=False, action='store_const', const=True,
+    parser.add_argument('-r', '--recursive', action='store_true',
                         help='Start containers recursively')
 
     args = parser.parse_args()
@@ -443,8 +453,12 @@ def main():
             if os.path.exists(possible_config):
                 args.config = possible_config
                 break
+    if args.config is None:
+        print('No config found', file=sys.stderr)
+        return 1
 
-    loader = ContainerLoader(os.path.abspath(args.config), Client())
+    loader = ContainerLoader(os.path.abspath(args.config), Client(),
+                             output=args.output in ['actions', 'both'], log=args.output in ['log', 'both'])
     container = loader.get(args.container)
 
     if 'create' == args.verb:
@@ -472,6 +486,8 @@ def main():
         call = Rpc([container.id] + [args.verb] + args.parameters)
         call.call(container, loader)
 
+    return 0
+
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
