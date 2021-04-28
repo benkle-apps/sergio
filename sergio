@@ -397,10 +397,12 @@ class DumpFile(SpecialAction):
     def call(self, container: Container, loader: ContainerLoader):
         container.log(f'Dropping file {self.filename}')
         container.get_lxc().execute(['mkdir', '-p', os.path.dirname(self.filename)])
-        container.get_lxc().files.put(
-            self.filename,
-            loader.templating.apply(container.files[self.filename], container.variables)
-        )
+        content = container.files[self.filename]
+        if isinstance(content, LoadFile):
+            content = content.read()
+        if isinstance(content, str):
+            content =loader.templating.apply(content, container.variables)
+        container.get_lxc().files.put(self.filename, content)
         container.exec(f'sudo chown {container.user}:{container.user} {self.filename}')
 
 
@@ -413,9 +415,28 @@ class SetWorkdir(SpecialAction):
         container.workdir = self.workdir
 
 
+class LoadFile:
+    def __init__(self, node: ScalarNode):
+        self.is_bytes = False
+        value = str(node.value)
+        if value.endswith(' b'):
+            self.is_bytes = True
+            value = value[:-2]
+        elif value.endswith(' s'):
+            value = value[:-2]
+        self.filename = os.path.abspath(value)
+
+    def read(self) -> Union[bytes, str]:
+        mode = 'rb+' if self.is_bytes else 'r+'
+        with open(self.filename, mode) as f:
+            result = f.read()
+        return result
+
+
 yaml.add_constructor('!rpc', lambda loader, node: Rpc(node), Loader=SafeLoader)
 yaml.add_constructor('!df', lambda loader, node: DumpFile(node), Loader=SafeLoader)
 yaml.add_constructor('!cwd', lambda loader, node: SetWorkdir(node), Loader=SafeLoader)
+yaml.add_constructor('!load', lambda loader, node: LoadFile(node), Loader=SafeLoader)
 
 
 def main():
