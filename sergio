@@ -122,8 +122,8 @@ class Mountpoint:
     def mount(self):
         if not self.is_mounted():
             self.container.get_lxc().devices[self.name] = {
-                'path': self.path,
-                'source': self.source,
+                'path': self.container.loader.templating.apply(self.path, self.container.variables),
+                'source': self.container.loader.templating.apply(self.source, self.container.variables),
                 'type': 'disk',
             }
 
