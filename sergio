@@ -230,10 +230,13 @@ class Container:
             self.log(f'Creation failed')
 
     def destroy(self):
+        if 'destroy' in self.actions and not self.is_running():
+            self.start(True)
         if self.is_running():
             self.execute_action('stop')
             self.denat()
-        self.execute_action('destroy')
+        if 'destroy' in self.actions:
+            self.execute_action('destroy')
         subprocess.call(['lxc', 'delete', self.id, '-f'])
 
     def start(self, recursive: bool):
