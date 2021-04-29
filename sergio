@@ -418,6 +418,7 @@ class SetWorkdir(SpecialAction):
         self.workdir = node.value if type(node) == ScalarNode else node
 
     def call(self, container: Container, loader: ContainerLoader):
+        container.log(f'Change work directory to {self.workdir}')
         container.workdir = self.workdir
 
 
