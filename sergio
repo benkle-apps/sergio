@@ -366,7 +366,10 @@ class Container:
                 if backup_file is not None and os.path.exists(backup_file):
                     with open(backup_file, 'rb+') as f:
                         self.get_lxc().files.put('/tmp/backup.zip', f.read(), mode=0o777)
-                    self.execute_action('restore')
+                    try:
+                        self.execute_action('restore')
+                    except Exception as e:
+                        pass
                     self.get_lxc().files.delete('/tmp/backup.zip')
                     break
 
@@ -493,30 +496,34 @@ def main():
                              output=args.output in ['actions', 'both'], log=args.output in ['log', 'both'])
     container = loader.get(args.container)
 
-    if 'create' == args.verb:
-        container.create()
-    elif 'destroy' == args.verb:
-        container.destroy()
-    elif 'start' == args.verb:
-        container.start(args.recursive)
-    elif 'stop' == args.verb:
-        container.stop()
-    elif 'nat' == args.verb:
-        container.nat()
-    elif 'denat' == args.verb:
-        container.denat()
-    elif 'login' == args.verb:
-        container.login()
-    elif 'backup' == args.verb:
-        container.backup()
-    elif 'restore' == args.verb:
-        container.restore(args.parameters[0] if args.parameters else None)
-    elif 'exec' == args.verb:
-        call = Rpc([container.id] + args.parameters)
-        call.call(container, loader)
-    else:
-        call = Rpc([container.id] + [args.verb] + args.parameters)
-        call.call(container, loader)
+    try:
+        if 'create' == args.verb:
+            container.create()
+        elif 'destroy' == args.verb:
+            container.destroy()
+        elif 'start' == args.verb:
+            container.start(args.recursive)
+        elif 'stop' == args.verb:
+            container.stop()
+        elif 'nat' == args.verb:
+            container.nat()
+        elif 'denat' == args.verb:
+            container.denat()
+        elif 'login' == args.verb:
+            container.login()
+        elif 'backup' == args.verb:
+            container.backup()
+        elif 'restore' == args.verb:
+            container.restore(args.parameters[0] if args.parameters else None)
+        elif 'exec' == args.verb:
+            call = Rpc([container.id] + args.parameters)
+            call.call(container, loader)
+        else:
+            call = Rpc([container.id] + [args.verb] + args.parameters)
+            call.call(container, loader)
+    except Exception as e:
+        print(e, file=sys.stderr)
+        return 1
 
     return 0
 
