@@ -295,17 +295,20 @@ class Container:
         )
 
     def execute_action(self, action: str, parameters: dict = {}):
+        idle = False
         if action not in self.actions:
             self.log(f'Action "{action}" does not exist')
             return
         self.log(f'Execute action "{action}"')
         for line in self.actions[action]:
-            if type(line) == str:
+            if '!idle' == line:
+                idle = True
+            elif type(line) == str:
                 line = self.loader.templating.apply(line, self.variables, parameters)
                 self.log(line)
-                if 0 != self.exec(line):
+                if 0 != self.exec(line) and not idle:
                     raise Exception('Execution failed')
-            if isinstance(line, SpecialAction):
+            elif isinstance(line, SpecialAction):
                 line.call(self, self.loader)
 
     def get_ip(self, device: str = 'eth0') -> str:
@@ -407,7 +410,7 @@ class DumpFile(SpecialAction):
         if isinstance(content, LoadFile):
             content = content.read()
         if isinstance(content, str):
-            content =loader.templating.apply(content, container.variables)
+            content = loader.templating.apply(content, container.variables)
         container.get_lxc().files.put(self.filename, content)
         container.exec(f'sudo chown {container.user}:{container.user} {self.filename}')
 
@@ -444,6 +447,7 @@ yaml.add_constructor('!rpc', lambda loader, node: Rpc(node), Loader=SafeLoader)
 yaml.add_constructor('!df', lambda loader, node: DumpFile(node), Loader=SafeLoader)
 yaml.add_constructor('!cwd', lambda loader, node: SetWorkdir(node), Loader=SafeLoader)
 yaml.add_constructor('!load', lambda loader, node: LoadFile(node), Loader=SafeLoader)
+yaml.add_constructor('!idle', lambda loader, node: '!idle', Loader=SafeLoader)
 
 
 def main():
