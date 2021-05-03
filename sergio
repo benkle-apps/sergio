@@ -324,11 +324,13 @@ class Container:
             self.lxc = self.lxd.containers.get(self.id)
         return self.lxc
 
-    def login(self):
+    def login(self, directory=None):
         if not self.is_running():
             self.log('Not running')
-        else:
-            self.exec()
+            return
+        elif directory is not None:
+            self.workdir = directory
+        self.exec(self.shell)
 
     def backup(self):
         if not self.is_running():
@@ -510,7 +512,7 @@ def main():
         elif 'denat' == args.verb:
             container.denat()
         elif 'login' == args.verb:
-            container.login()
+            container.login(args.parameters[0] if args.parameters else None)
         elif 'backup' == args.verb:
             container.backup()
         elif 'restore' == args.verb:
