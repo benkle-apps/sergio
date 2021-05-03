@@ -309,7 +309,7 @@ class Container:
                 if 0 != self.exec(line) and not idle:
                     raise Exception('Execution failed')
             elif isinstance(line, SpecialAction):
-                line.call(self, self.loader)
+                line.call(self, self.loader, parameters)
 
     def get_ip(self, device: str = 'eth0') -> str:
         if self.ips and device not in self.ips:
@@ -380,7 +380,7 @@ class SpecialAction:
     def __init__(self, node: Union[ScalarNode, list]):
         pass
 
-    def call(self, container: Container, loader: ContainerLoader):
+    def call(self, container: Container, loader: ContainerLoader, rpc_variables: dict = None):
         pass
 
 
@@ -395,27 +395,27 @@ class Rpc(SpecialAction):
         for parameter, value in map(lambda p: p.split('=', 2), parameters):
             self.parameters[parameter] = value
 
-    def call(self, container: Container, loader: ContainerLoader):
+    def call(self, container: Container, loader: ContainerLoader, rpc_variables: dict = None):
         target = loader.get(container.id if 'self' == self.container else self.container)
         parameters = {}
         for parameter, value in self.parameters.items():
-            parameters[parameter] = loader.templating.apply(value, container.variables)
+            parameters[parameter] = loader.templating.apply(value, container.variables, rpc_variables)
         target.execute_action(self.action, parameters)
 
 
 class DumpFile(SpecialAction):
     def __init__(self, node: Union[ScalarNode, list]):
         super().__init__(node)
-        self.filename = node.value if type(node) == ScalarNode else node
+        self.filename = node.value if type(node) == ScalarNode else ''.join(node)
 
-    def call(self, container: Container, loader: ContainerLoader):
+    def call(self, container: Container, loader: ContainerLoader, rpc_variables: dict = None):
         container.log(f'Dropping file {self.filename}')
         container.get_lxc().execute(['mkdir', '-p', os.path.dirname(self.filename)])
         content = container.files[self.filename]
         if isinstance(content, LoadFile):
             content = content.read()
         if isinstance(content, str):
-            content = loader.templating.apply(content, container.variables)
+            content = loader.templating.apply(content, container.variables, rpc_variables)
         container.get_lxc().files.put(self.filename, content)
         container.exec(f'sudo chown {container.user}:{container.user} {self.filename}')
 
@@ -423,11 +423,21 @@ class DumpFile(SpecialAction):
 class SetWorkdir(SpecialAction):
     def __init__(self, node: Union[ScalarNode, list]):
         super().__init__(node)
-        self.workdir = node.value if type(node) == ScalarNode else node
+        self.workdir = node.value if type(node) == ScalarNode else ''.join(node)
 
-    def call(self, container: Container, loader: ContainerLoader):
-        container.log(f'Change work directory to {self.workdir}')
-        container.workdir = self.workdir
+    def call(self, container: Container, loader: ContainerLoader, rpc_variables: dict = None):
+        cwd = container.loader.templating.apply(self.workdir, container.variables, rpc_variables)
+        container.log(f'Change work directory to {cwd}')
+        container.workdir = cwd
+
+
+class Echo(SpecialAction):
+    def __init__(self, node: Union[ScalarNode, list]):
+        super().__init__(node)
+        self.text = node.value if type(node) == ScalarNode else ''.join(node)
+
+    def call(self, container: Container, loader: ContainerLoader, rpc_variables: dict = None):
+        container.log(container.loader.templating.apply(self.text, container.variables, rpc_variables))
 
 
 class LoadFile:
@@ -451,6 +461,7 @@ class LoadFile:
 yaml.add_constructor('!rpc', lambda loader, node: Rpc(node), Loader=SafeLoader)
 yaml.add_constructor('!df', lambda loader, node: DumpFile(node), Loader=SafeLoader)
 yaml.add_constructor('!cwd', lambda loader, node: SetWorkdir(node), Loader=SafeLoader)
+yaml.add_constructor('!echo', lambda loader, node: Echo(node), Loader=SafeLoader)
 yaml.add_constructor('!load', lambda loader, node: LoadFile(node), Loader=SafeLoader)
 yaml.add_constructor('!idle', lambda loader, node: '!idle', Loader=SafeLoader)
 
