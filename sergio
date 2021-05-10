@@ -154,17 +154,21 @@ class Container:
         self.shell = defaulting(data, 'shell', '/bin/sh')
         self.user = defaulting(data, 'user', 'root')
 
-    def check_requirements(self, ignore_stopped: bool = False):
-        okay = True
-        for requirement in self.requires:
+    def check_requirements(self, can_start: bool = False, can_create: bool = False):
+        requirements = self.get_launch_order()
+        for requirement in requirements:
             requirement = self.loader.get(requirement)
-            if not requirement.exists():
-                self.log(f'Requires {requirement.name} ({requirement.id}), but it does not exist')
-                okay = False
-            elif not ignore_stopped and not requirement.is_running():
-                self.log(f'Requires {requirement.name} ({requirement.id}), but it is not running')
-                okay = False
-        return okay
+            if can_create:
+                requirement.create_or_start(True)
+            elif not requirement.exists():
+                self.log(f'Required container {requirement.name} ({requirement.id}) does not exist')
+                return False
+            elif not requirement.is_running() and can_start:
+                requirement.start(True)
+            elif not requirement.is_running():
+                self.log(f'Required container {requirement.name} ({requirement.id}) is not running')
+                return False
+        return True
 
     def is_running(self) -> bool:
         return self.get_lxc().status == 'Running'
@@ -197,15 +201,11 @@ class Container:
             for container, requirements in containers.items():
                 if launchable in requirements:
                     requirements.remove(launchable)
-        for launchable in launch_order:
-            launchable = self.loader.get(launchable)
-            if not launchable.exists():
-                raise Exception(f'Requires {launchable.name} ({launchable.id}), but it does not exist')
         return launch_order
 
-    def log(self, message: str):
+    def log(self, message: str, file=sys.stdout):
         if self.loader.log:
-            print(f'[{self.name}] {message}')
+            print(f'[{self.name}] {message}', file=file)
 
     def mount(self):
         for mountpoint in self.mountpoints:
@@ -214,10 +214,16 @@ class Container:
                 mountpoint.mount()
         self.get_lxc().save()
 
-    def create(self):
+    def create_or_start(self, recursive: bool):
+        if not self.exists():
+            self.create(recursive)
+        elif not self.is_running():
+            self.start(recursive)
+
+    def create(self, recursive: bool):
         self.log(f'Create new container {self.id} from {self.box}')
-        if not self.check_requirements():
-            self.log('Requirements not met')
+        if not self.check_requirements(recursive, recursive):
+            raise Exception('Requirements not met')
         elif 0 == subprocess.call(['lxc', 'launch', self.box, self.id, '-v']):
             self.mount()
             self.log('Waiting for network to calm down')
@@ -227,7 +233,7 @@ class Container:
             self.execute_action('start')
             self.log('Done')
         else:
-            self.log(f'Creation failed')
+            raise Exception(f'Creation failed')
 
     def destroy(self):
         if 'destroy' in self.actions and not self.is_running():
@@ -243,13 +249,8 @@ class Container:
         if self.is_running():
             self.log('Already running')
         elif not self.check_requirements(recursive):
-            self.log('Requirements not met')
+            raise Exception('Requirements not met')
         else:
-            if recursive:
-                for requirement in self.get_launch_order():
-                    container = self.loader.get(requirement)
-                    if not container.is_running():
-                        container.start(False)
             self.log('Starting...')
             self.get_lxc().start(wait=True)
             self.log('Waiting for network to calm down')
@@ -270,7 +271,7 @@ class Container:
 
     def nat(self):
         if not self.is_running():
-            self.log('Container not running, not NAT needed')
+            self.log('Container not running, no NAT needed')
             return
         for port in self.ports:
             self.log(f'Forwarding {port.to_port} to {port.get_ip()}:{port.from_port} ({port.device})')
@@ -511,7 +512,7 @@ def main():
 
     try:
         if 'create' == args.verb:
-            container.create()
+            container.create(args.recursive)
         elif 'destroy' == args.verb:
             container.destroy()
         elif 'start' == args.verb:
@@ -535,7 +536,7 @@ def main():
             call = Rpc([container.id] + [args.verb] + args.parameters)
             call.call(container, loader)
     except Exception as e:
-        print(e, file=sys.stderr)
+        container.log(str(e), file=sys.stderr)
         return 1
 
     return 0
