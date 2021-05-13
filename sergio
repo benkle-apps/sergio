@@ -274,13 +274,13 @@ class Container:
             self.log('Container not running, no NAT needed')
             return
         for port in self.ports:
-            self.log(f'Forwarding {port.to_port} to {port.get_ip()}:{port.from_port} ({port.device})')
+            self.log(f'Forwarding {port.protocol}:{port.to_port} to {port.get_ip()}:{port.from_port} ({port.device})')
             port.delete()
             port.create()
 
     def denat(self):
         for port in self.ports:
-            self.log(f'Removing forward from {port.to_port} to {port.get_ip()}:{port.from_port} ({port.device})')
+            self.log(f'Removing forward from {port.protocol}:{port.to_port} to {port.get_ip()}:{port.from_port} ({port.device})')
             port.delete()
 
     def exec(self, code: str = None) -> int:
@@ -401,6 +401,7 @@ class Rpc(SpecialAction):
         parameters = {}
         for parameter, value in self.parameters.items():
             parameters[parameter] = loader.templating.apply(value, container.variables, rpc_variables)
+        parameters['caller'] = container.id
         target.execute_action(self.action, parameters)
 
 
