@@ -48,13 +48,14 @@ class ContainerLoader:
     def __init__(self, config_file: str, lxd: Client, output, log):
         with open(config_file, 'r+') as f:
             config = yaml.safe_load(f)
-        self.definitions_dir = relate_path(os.path.dirname(config_file), config['definitions'])
+        self.config_dir = os.path.dirname(os.path.realpath(config_file))
+        self.definitions_dir = relate_path(self.config_dir, config['definitions'])
         self.container = {}
         self.lxd = lxd
         self.output = output
         self.log = log
         self.templating = Templating(defaulting(config, 'variables', {}))
-        self.backup_dir = relate_path(os.path.dirname(config_file), config['backups'])
+        self.backup_dir = relate_path(self.config_dir, config['backups'])
 
     def list(self) -> list:
         result = []
@@ -415,7 +416,7 @@ class DumpFile(SpecialAction):
         container.get_lxc().execute(['mkdir', '-p', os.path.dirname(self.filename)])
         content = container.files[self.filename]
         if isinstance(content, LoadFile):
-            content = content.read()
+            content = content.read(loader)
         if isinstance(content, str):
             content = loader.templating.apply(content, container.variables, rpc_variables)
         container.get_lxc().files.put(self.filename, content)
@@ -451,12 +452,23 @@ class LoadFile:
             value = value[:-2]
         elif value.endswith(' s'):
             value = value[:-2]
-        self.filename = os.path.abspath(value)
+        self.filename = value
 
-    def read(self) -> Union[bytes, str]:
+    def read(self, loader: ContainerLoader) -> Union[bytes, str]:
         mode = 'rb+' if self.is_bytes else 'r+'
-        with open(self.filename, mode) as f:
-            result = f.read()
+        filenames = [
+            os.path.abspath(self.filename),
+            os.path.abspath(os.path.join(loader.config_dir, self.filename))
+        ]
+        result = None
+        for filename in filenames:
+            if not os.path.exists(filename):
+                continue
+            with open(filename, mode) as f:
+                result = f.read()
+            break
+        if result is None:
+            raise FileNotFoundError(self.filename)
         return result
 
 
@@ -471,10 +483,12 @@ yaml.add_constructor('!idle', lambda loader, node: '!idle', Loader=SafeLoader)
 def main():
 
     possible_configs = [
+        os.path.join(os.getcwd(), 'sergio.yml'),
+        os.path.join(os.getcwd(), 'sergio.yaml'),
         os.path.join(os.getcwd(), 'config.yml'),
         os.path.join(os.getcwd(), 'config.yaml'),
-        os.path.join(os.path.expanduser('~'), 'config.yml'),
-        os.path.join(os.path.expanduser('~'), 'config.yaml'),
+        os.path.join(os.path.expanduser('~'), 'sergio.yml'),
+        os.path.join(os.path.expanduser('~'), 'sergio.yaml'),
     ]
 
     parser = argparse.ArgumentParser(description='Manager/Provisioner for LXD')
@@ -537,7 +551,7 @@ def main():
             call = Rpc([container.id] + [args.verb] + args.parameters)
             call.call(container, loader)
     except Exception as e:
-        container.log(str(e), file=sys.stderr)
+        container.log(f'{e.__class__.__name__}: {e}', file=sys.stderr)
         return 1
 
     return 0
