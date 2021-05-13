@@ -460,7 +460,8 @@ class LoadFile:
         mode = 'rb+' if self.is_bytes else 'r+'
         filenames = [
             os.path.abspath(self.filename),
-            os.path.abspath(os.path.join(loader.config_dir, self.filename))
+            os.path.abspath(os.path.join(loader.config_dir, self.filename)),
+            os.path.abspath(os.path.join(loader.definitions_dir, self.filename))
         ]
         result = None
         for filename in filenames:
