@@ -425,6 +425,16 @@ class DumpFile(SpecialAction):
         container.exec(f'sudo chown {container.user}:{container.user} {self.filename}')
 
 
+class RemoveFile(SpecialAction):
+    def __init__(self, node: Union[ScalarNode, list]):
+        super().__init__(node)
+        self.filename = node.value if type(node) == ScalarNode else ''.join(node)
+
+    def call(self, container: Container, loader: ContainerLoader, rpc_variables: dict = None):
+        container.log(f'Removing file {self.filename}')
+        container.get_lxc().files.delete(self.filename)
+
+
 class SetWorkdir(SpecialAction):
     def __init__(self, node: Union[ScalarNode, list]):
         super().__init__(node)
@@ -477,6 +487,7 @@ class LoadFile:
 
 yaml.add_constructor('!rpc', lambda loader, node: Rpc(node), Loader=SafeLoader)
 yaml.add_constructor('!df', lambda loader, node: DumpFile(node), Loader=SafeLoader)
+yaml.add_constructor('!rm', lambda loader, node: RemoveFile(node), Loader=SafeLoader)
 yaml.add_constructor('!cwd', lambda loader, node: SetWorkdir(node), Loader=SafeLoader)
 yaml.add_constructor('!echo', lambda loader, node: Echo(node), Loader=SafeLoader)
 yaml.add_constructor('!load', lambda loader, node: LoadFile(node), Loader=SafeLoader)
