@@ -283,7 +283,8 @@ class Container:
 
     def denat(self):
         for port in self.ports:
-            self.log(f'Removing forward from {port.protocol}:{port.to_port} to {port.get_ip()}:{port.from_port} ({port.device})')
+            self.log(
+                f'Removing forward from {port.protocol}:{port.to_port} to {port.get_ip()}:{port.from_port} ({port.device})')
             port.delete()
 
     def exec(self, code: str = None) -> int:
@@ -360,10 +361,10 @@ class Container:
             self.log('No restore action')
         else:
             backup_files = [
-                os.path.join(os.getcwd(), backup_file) if backup_file else None,
-                os.path.join(self.loader.backup_dir, backup_file) if backup_file else None,
-                os.path.join(self.loader.backup_dir, f'{self.id}_latest.zip')
-            ] + sorted([
+                               os.path.join(os.getcwd(), backup_file) if backup_file else None,
+                               os.path.join(self.loader.backup_dir, backup_file) if backup_file else None,
+                               os.path.join(self.loader.backup_dir, f'{self.id}_latest.zip')
+                           ] + sorted([
                 os.path.join(self.loader.backup_dir, file)
                 for file in os.listdir(self.loader.backup_dir)
                 if re.match(self.id + '_[0-9]{4}([-_][0-9]{2}){5}.zip', file)
@@ -432,7 +433,10 @@ class RemoveFile(SpecialAction):
 
     def call(self, container: Container, loader: ContainerLoader, rpc_variables: dict = None):
         container.log(f'Removing file {self.filename}')
-        container.get_lxc().files.delete(self.filename)
+        try:
+            container.get_lxc().files.delete(self.filename)
+        except:
+            pass
 
 
 class SetWorkdir(SpecialAction):
@@ -495,7 +499,6 @@ yaml.add_constructor('!idle', lambda loader, node: '!idle', Loader=SafeLoader)
 
 
 def main():
-
     possible_configs = [
         os.path.join(os.getcwd(), 'sergio.yml'),
         os.path.join(os.getcwd(), 'sergio.yaml'),
