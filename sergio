@@ -10,12 +10,16 @@ import sys
 import time
 import datetime
 import yaml
+import warnings
 
 from string import Template
 from pylxd import Client
 from pylxd.models import Container as LxdContainer
 from yaml import ScalarNode, SafeLoader
 from typing import Union
+
+
+warnings.filterwarnings('ignore')
 
 
 def defaulting(obj: dict, key: str, default=None):
