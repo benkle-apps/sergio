@@ -555,7 +555,7 @@ def main():
             container.start(args.recursive)
         elif 'stop' == args.verb:
             container.stop()
-        if 'running' == args.verb:
+        elif 'running' == args.verb:
             return 0 if container.is_running() else 1
         elif 'nat' == args.verb:
             container.nat()
