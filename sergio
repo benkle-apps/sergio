@@ -11,6 +11,7 @@ import time
 import datetime
 import yaml
 import warnings
+import traceback
 
 from string import Template
 from pylxd import Client
@@ -426,7 +427,7 @@ class DumpFile(SpecialAction):
             content = content.read(loader)
         if isinstance(content, str):
             content = loader.templating.apply(content, container.variables, rpc_variables)
-        container.get_lxc().files.put(self.filename, content)
+        container.get_lxc().files.put(self.filename, content.encode('utf-8'))
         container.exec(f'sudo chown {container.user}:{container.user} {self.filename}')
 
 
@@ -575,6 +576,8 @@ def main():
             call.call(container, loader)
     except Exception as e:
         container.log(f'{e.__class__.__name__}: {e}', file=sys.stderr)
+        for line in traceback.format_exc().split("\n"):
+            container.log(f'{line}', file=sys.stderr)
         return 1
 
     return 0
