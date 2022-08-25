@@ -426,8 +426,8 @@ class DumpFile(SpecialAction):
         if isinstance(content, LoadFile):
             content = content.read(loader)
         if isinstance(content, str):
-            content = loader.templating.apply(content, container.variables, rpc_variables)
-        container.get_lxc().files.put(self.filename, content.encode('utf-8'))
+            content = loader.templating.apply(content, container.variables, rpc_variables).encode('utf-8')
+        container.get_lxc().files.put(self.filename, content)
         container.exec(f'sudo chown {container.user}:{container.user} {self.filename}')
 
 
@@ -491,7 +491,7 @@ class LoadFile:
             break
         if result is None:
             raise FileNotFoundError(self.filename)
-        return result
+        return result if self.is_bytes else result.encode('utf-8')
 
 
 yaml.add_constructor('!rpc', lambda loader, node: Rpc(node), Loader=SafeLoader)
