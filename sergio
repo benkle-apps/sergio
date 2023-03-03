@@ -546,6 +546,7 @@ def main():
     loader = ContainerLoader(os.path.abspath(args.config), Client(),
                              output=args.output in ['actions', 'both'], log=args.output in ['log', 'both'])
     container = loader.get(args.container)
+    os.chdir(os.path.expanduser('~')) # We move to user home so avoid execution problems
 
     try:
         if 'create' == args.verb:
