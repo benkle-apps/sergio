@@ -16,6 +16,7 @@ import traceback
 from string import Template
 from pylxd import Client
 from pylxd.models import Container as LxdContainer
+from pylxd.exceptions import NotFound
 from yaml import ScalarNode, SafeLoader
 from typing import Union
 
@@ -179,7 +180,10 @@ class Container:
         return True
 
     def is_running(self) -> bool:
-        return self.get_lxc().status == 'Running'
+        try:
+            return self.get_lxc().status == 'Running'
+        except NotFound:
+            return False
 
     def exists(self):
         return self.lxd.containers.exists(self.id)
@@ -345,7 +349,7 @@ class Container:
     def backup(self):
         if not self.is_running():
             self.log('Not running')
-        if 'backup' not in self.actions or self.actions['backup'] is None:
+        elif 'backup' not in self.actions or self.actions['backup'] is None:
             self.log('No backup action')
         else:
             self.execute_action('backup')
