@@ -248,13 +248,16 @@ class Container:
             raise Exception(f'Creation failed')
 
     def destroy(self):
-        if 'destroy' in self.actions and not self.is_running():
-            self.start(True)
-        if self.is_running():
-            self.execute_action('stop')
-            self.denat()
-        if 'destroy' in self.actions:
-            self.execute_action('destroy')
+        try:
+            if 'destroy' in self.actions and not self.is_running():
+                self.start(True)
+            if self.is_running():
+                self.execute_action('stop')
+                self.denat()
+            if 'destroy' in self.actions:
+                self.execute_action('destroy')
+        except:
+            pass
         subprocess.call(['lxc', 'delete', self.id, '-f'])
 
     def start(self, recursive: bool):
