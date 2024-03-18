@@ -36,6 +36,12 @@ def relate_path(base: str, path: str) -> str:
     return path
 
 
+class StdClass:
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+
 class Templating:
     def __init__(self, variables: dict):
         self.variables = variables
@@ -140,7 +146,62 @@ class Mountpoint:
         return self.name in self.container.get_lxc().devices
 
 
+class ActionStack:
+    actions: list[list[str]]
+
+    def __init__(self, actions: list[str] = None):
+        self.actions = [actions] if actions else []
+
+    def __add__(self, other: ActionStack) -> ActionStack:
+        result = ActionStack()
+        for action in self.actions:
+            result.actions.append(action)
+        for action in other.actions:
+            result.actions.append(action)
+        return result
+
+    def add_action(self, actions: list[str]):
+        self.actions.append(actions)
+
+    def exec(self, container: Container, loader: ContainerLoader, parameters: dict=None, position: int = -1):
+        position = (len(self.actions) + position) % len(self.actions) # resolve ourselves to make counting easier
+        idle = False
+        for line in self.actions[position]:
+            if '!idle' == line:
+                idle = True
+            elif '!parent' == line:
+                if position == 0:
+                    raise Exception('Ran out of stack')
+                else:
+                    self.exec(container, loader, parameters, position - 1)
+            elif type(line) == str:
+                line = loader.templating.apply(line, container.variables, parameters)
+                container.log(line)
+                if 0 != container.exec(line) and not idle:
+                    raise Exception('Execution failed')
+            elif isinstance(line, SpecialAction):
+                line.call(container, loader, parameters)
+
+
 class Container:
+    id: str
+    loader: ContainerLoader
+    lxd: Client
+    lxc: LxdContainer
+    ips: dict[str, str]
+    workdir: str
+    name: str
+    description: str
+    box: str
+    mountpoints: map[Mountpoint]
+    ports: map[Port]
+    requires: list[str]
+    actions: dict[str, ActionStack]
+    variables: dict[str, str]
+    files: dict[str, str]
+    shell: str
+    user: str
+
     def __init__(self, cid: str, data: dict, loader: ContainerLoader, lxd: Client):
         self.id = cid
         self.loader = loader
@@ -148,20 +209,43 @@ class Container:
         self.lxc = None
         self.ips = None
         self.workdir = None
+
         self.name = data['name']
         self.description = data['description']
-        self.box = data['box']
+        self.ports = map(lambda port: Port(port, self), defaulting(data, 'ports', []))
         self.mountpoints = map(
             lambda mp: Mountpoint(mp[0], mp[1], self),
             defaulting(data, 'mountpoints', {}).items()
         )
-        self.ports = map(lambda port: Port(port, self), defaulting(data, 'ports', []))
+
+        if 'extends' in data:
+            parent = loader.get(data['extends'])
+        else:
+            parent = StdClass(box='', shell='/bin/sh', user='root')
+
+        self.box = defaulting(data, 'box', parent.box)
+        self.shell = defaulting(data, 'shell', parent.shell)
+        self.user = defaulting(data, 'user', parent.user)
+
         self.requires = defaulting(data, 'requires', [])
-        self.actions = defaulting(data, 'actions', [])
         self.variables = defaulting(data, 'variables', {})
         self.files = defaulting(data, 'files', {})
-        self.shell = defaulting(data, 'shell', '/bin/sh')
-        self.user = defaulting(data, 'user', 'root')
+        self.actions = {}
+        for k, v in defaulting(data, 'actions', {}).items():
+            self.actions[k] = ActionStack(v)
+
+        if isinstance(parent, Container):
+            self.requires += parent.requires
+            self.variables = {**parent.variables, **self.variables}
+            self.files = {**parent.files, **self.files}
+            for action, action_stack in parent.actions.items():
+                if action in self.actions:
+                    self.actions[action] = action_stack + self.actions[action]
+                else:
+                    self.actions[action] = action_stack
+
+        self.variables['_name'] = self.name
+        self.variables['_description'] = self.name
 
     def check_requirements(self, can_start: bool = False, can_create: bool = False):
         requirements = self.get_launch_order()
@@ -311,22 +395,14 @@ class Container:
             stdout=output, stderr=output
         )
 
-    def execute_action(self, action: str, parameters: dict = {}):
-        idle = False
+    def execute_action(self, action: str, parameters=None):
+        if parameters is None:
+            parameters = {}
         if action not in self.actions:
             self.log(f'Action "{action}" does not exist')
             return
         self.log(f'Execute action "{action}"')
-        for line in self.actions[action]:
-            if '!idle' == line:
-                idle = True
-            elif type(line) == str:
-                line = self.loader.templating.apply(line, self.variables, parameters)
-                self.log(line)
-                if 0 != self.exec(line) and not idle:
-                    raise Exception('Execution failed')
-            elif isinstance(line, SpecialAction):
-                line.call(self, self.loader, parameters)
+        self.actions[action].exec(self, self.loader, parameters)
 
     def get_ip(self, device: str = 'eth0') -> str:
         if self.ips and device not in self.ips:
@@ -427,15 +503,16 @@ class DumpFile(SpecialAction):
         self.filename = node.value if type(node) == ScalarNode else ''.join(node)
 
     def call(self, container: Container, loader: ContainerLoader, rpc_variables: dict = None):
-        container.log(f'Dropping file {self.filename}')
-        container.get_lxc().execute(['mkdir', '-p', os.path.dirname(self.filename)])
+        filename = loader.templating.apply(self.filename, container.variables, rpc_variables)
+        container.log(f'Dropping file {filename}')
+        container.get_lxc().execute(['mkdir', '-p', os.path.dirname(filename)])
         content = container.files[self.filename]
         if isinstance(content, LoadFile):
             content = content.read(loader)
         if isinstance(content, str):
-            content = loader.templating.apply(content, container.variables, rpc_variables).encode('utf-8')
-        container.get_lxc().files.put(self.filename, content)
-        container.exec(f'sudo chown {container.user}:{container.user} {self.filename}')
+            content = loader.templating.apply(content, container.variables, rpc_variables)
+        container.get_lxc().files.put(filename, content)
+        container.exec(f'sudo chown {container.user}:{container.user} {filename}')
 
 
 class RemoveFile(SpecialAction):
@@ -508,6 +585,7 @@ yaml.add_constructor('!cwd', lambda loader, node: SetWorkdir(node), Loader=SafeL
 yaml.add_constructor('!echo', lambda loader, node: Echo(node), Loader=SafeLoader)
 yaml.add_constructor('!load', lambda loader, node: LoadFile(node), Loader=SafeLoader)
 yaml.add_constructor('!idle', lambda loader, node: '!idle', Loader=SafeLoader)
+yaml.add_constructor('!parent', lambda loader, node: '!parent', Loader=SafeLoader)
 
 
 def main():
