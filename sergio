@@ -9,6 +9,8 @@ import subprocess
 import sys
 import time
 import datetime
+import shlex
+
 import yaml
 import warnings
 import traceback
@@ -468,6 +470,25 @@ class Container:
                     self.get_lxc().files.delete('/tmp/backup.zip')
                     break
 
+    def download_file(self, source: str, target: str):
+        if not self.is_running():
+            self.log('Not running')
+        elif '-' == target:
+            print(self.get_lxc().files.get(source))
+        else:
+            with open(target, 'wb+') as f:
+                f.write(self.get_lxc().files.get(source))
+
+    def upload_file(self, source: str, target: str):
+        if not self.is_running():
+            self.log('Not running')
+        else:
+            content = sys.stdin if '-' == source else open(source, 'rb+')
+            self.get_lxc().files.put(target, content.read(), mode=0o777)
+            container.exec(f'sudo chown {container.user}:{container.user} {target}')
+            content.close()
+
+
 
 class SpecialAction:
     def __init__(self, node: Union[ScalarNode, list]):
@@ -513,6 +534,28 @@ class DumpFile(SpecialAction):
             content = loader.templating.apply(content, container.variables, rpc_variables)
         container.get_lxc().files.put(filename, content)
         container.exec(f'sudo chown {container.user}:{container.user} {filename}')
+
+
+class TransferFile(SpecialAction):
+    def __init__(self, node: Union[ScalarNode, list]):
+        super().__init__(node)
+        parameters = shlex.split(node.value) if type(node) == ScalarNode else node
+        match parameters.pop(0):
+            case 'd' | 'down' | '<':
+                self.direction = 'down'
+            case 'u' | 'up' | '>':
+                self.direction = 'up'
+            case _:
+                raise Exception('Bad direction for file transfer')
+        self.container = parameters.pop(0)
+        self.source = parameters.pop(0)
+        self.target = parameters.pop(0)
+
+    def call(self, container: Container, loader: ContainerLoader, rpc_variables: dict = None):
+        target = loader.get(container.id if 'down' == self.direction else self.container)
+        source = loader.get(container.id if 'up' == self.direction else self.container)
+        target.get_lxc().files.put(self.target, source.get_lxc().files.get(self.source), mode=0o777)
+        container.exec(f'sudo chown {target.user}:{target.user} {self.target}')
 
 
 class RemoveFile(SpecialAction):
@@ -580,6 +623,7 @@ class LoadFile:
 
 yaml.add_constructor('!rpc', lambda loader, node: Rpc(node), Loader=SafeLoader)
 yaml.add_constructor('!df', lambda loader, node: DumpFile(node), Loader=SafeLoader)
+yaml.add_constructor('!tf', lambda loader, node: TransferFile(node), Loader=SafeLoader)
 yaml.add_constructor('!rm', lambda loader, node: RemoveFile(node), Loader=SafeLoader)
 yaml.add_constructor('!cwd', lambda loader, node: SetWorkdir(node), Loader=SafeLoader)
 yaml.add_constructor('!echo', lambda loader, node: Echo(node), Loader=SafeLoader)
@@ -654,6 +698,10 @@ def main():
             container.backup()
         elif 'restore' == args.verb:
             container.restore(args.parameters[0] if args.parameters else None)
+        elif 'download' == args.verb:
+            container.download_file(*args.parameters)
+        elif 'upload' == args.verb:
+            container.upload_file(*args.parameters)
         elif 'exec' == args.verb:
             call = Rpc([container.id] + args.parameters)
             call.call(container, loader)
