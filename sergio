@@ -521,7 +521,16 @@ class Rpc(SpecialAction):
 class DumpFile(SpecialAction):
     def __init__(self, node: Union[ScalarNode, list]):
         super().__init__(node)
-        self.filename = node.value if type(node) == ScalarNode else ''.join(node)
+        parameters = shlex.split(node.value) if type(node) == ScalarNode else node
+        self.chown = False
+        self.chmod = False
+        while parameters[0].startswith('chmod=') or parameters[0].startswith('chown='):
+            if parameters[0].startswith('chown='):
+                self.chown = parameters[0].split('=', 2)[1]
+            if parameters[0].startswith('chmod='):
+                self.chmod = parameters[0].split('=', 2)[1]
+            parameters.pop(0)
+        self.filename = ' '.join(parameters)
 
     def call(self, container: Container, loader: ContainerLoader, rpc_variables: dict = None):
         filename = loader.templating.apply(self.filename, container.variables, rpc_variables)
@@ -533,7 +542,10 @@ class DumpFile(SpecialAction):
         if isinstance(content, str):
             content = loader.templating.apply(content, container.variables, rpc_variables)
         container.get_lxc().files.put(filename, content)
-        container.exec(f'sudo chown {container.user}:{container.user} {filename}')
+        chown = self.chown if self.chown else f'{container.user}:{container.user}'
+        container.exec(f'sudo chown {chown} {filename}')
+        chmod = self.chmod if self.chmod else '0755'
+        container.exec(f'sudo chmod {chmod} {filename}')
 
 
 class TransferFile(SpecialAction):
