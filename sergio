@@ -485,7 +485,7 @@ class Container:
         else:
             content = sys.stdin if '-' == source else open(source, 'rb+')
             self.get_lxc().files.put(target, content.read(), mode=0o777)
-            container.exec(f'sudo chown {container.user}:{container.user} {target}')
+            self.exec(f'sudo chown {self.user}:{self.user} {target}')
             content.close()
 
 
