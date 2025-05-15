@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ from pylxd.exceptions import NotFound
 from yaml import ScalarNode, SafeLoader
 from typing import Union
 
-
 warnings.filterwarnings('ignore')
 
 
@@ -36,6 +35,11 @@ def relate_path(base: str, path: str) -> str:
     if not os.path.isabs(path):
         path = os.path.abspath(os.path.join(base, path))
     return path
+
+
+def iptables(protocol: int, parameters: list[str]) -> bytes:
+    cmd = 'iptables' if 4 == protocol else 'ip6tables'
+    return subprocess.check_output(['sudo', '-S', cmd] + parameters)
 
 
 class StdClass:
@@ -107,24 +111,26 @@ class Port:
         self.to_port = data['to']
         self.comment = defaulting(data, 'comment', container.name)
 
-    def delete(self):
-        check = subprocess.check_output(['sudo', '-S', 'iptables', '-L', '-n', '-t', 'nat', '--line-numbers']) \
-            .split(b'\n')
+    def delete(self, protocol: int, silent: bool = False):
+        if not silent:
+            self.container.log(
+                f'Removing forward from {self.protocol}:{self.to_port} to ' +
+                f'{self.container.get_ip(protocol=protocol)}:{self.from_port} ({self.device})'
+            )
+        check = iptables(protocol, ['-L', '-n', '-t', 'nat', '--line-numbers']).split(b'\n')
         existing_rules = [line.split(b' ')[0] for line in check if f'dpt:{self.to_port}' in str(line)]
         existing_rules.reverse()
         for existing_rule in existing_rules:
-            subprocess.call(['sudo', '-S', 'iptables', '-t', 'nat', '-D', 'PREROUTING', existing_rule])
+            iptables(protocol, ['-t', 'nat', '-D', 'PREROUTING', existing_rule])
 
-    def create(self):
-        ip = self.get_ip()
-        subprocess.call([
-            'sudo', '-S', 'iptables', '-t', 'nat', '-A', 'PREROUTING', '-p', self.protocol, '-i', 'enp1s0f0',
+    def create(self, protocol: int):
+        ip = self.container.get_ip(protocol=protocol)
+        self.container.log(f'Forwarding {self.protocol}:{self.to_port} to {ip}:{self.from_port} ({self.device})')
+        iptables(protocol, [
+            '-t', 'nat', '-A', 'PREROUTING', '-p', self.protocol, '-i', 'enp1s0f0',
             '--dport', str(self.to_port), '-j', 'DNAT', '--to-destination', f'{ip}:{self.from_port}', '-m',
             'comment', '--comment', self.comment
         ])
-
-    def get_ip(self) -> str:
-        return self.container.get_ip(self.device)
 
 
 class Mountpoint:
@@ -165,8 +171,8 @@ class ActionStack:
     def add_action(self, actions: list[str]):
         self.actions.append(actions)
 
-    def exec(self, container: Container, loader: ContainerLoader, parameters: dict=None, position: int = -1):
-        position = (len(self.actions) + position) % len(self.actions) # resolve ourselves to make counting easier
+    def exec(self, container: Container, loader: ContainerLoader, parameters: dict = None, position: int = -1):
+        position = (len(self.actions) + position) % len(self.actions)  # resolve ourselves to make counting easier
         idle = False
         for line in self.actions[position]:
             if '!idle' == line:
@@ -375,15 +381,15 @@ class Container:
             self.log('Container not running, no NAT needed')
             return
         for port in self.ports:
-            self.log(f'Forwarding {port.protocol}:{port.to_port} to {port.get_ip()}:{port.from_port} ({port.device})')
-            port.delete()
-            port.create()
+            port.delete(4, True)
+            port.create(4)
+            port.delete(6, True)
+            port.create(6)
 
     def denat(self):
         for port in self.ports:
-            self.log(
-                f'Removing forward from {port.protocol}:{port.to_port} to {port.get_ip()}:{port.from_port} ({port.device})')
-            port.delete()
+            port.delete(4)
+            port.delete(6)
 
     def exec(self, code: str = None) -> int:
         cmd = []
@@ -406,13 +412,23 @@ class Container:
         self.log(f'Execute action "{action}"')
         self.actions[action].exec(self, self.loader, parameters)
 
-    def get_ip(self, device: str = 'eth0') -> str:
-        if self.ips and device not in self.ips:
-            raise Exception(f'Container {self.id} has no device {device}')
-        self.ips = {}
+    def parse_devices(self, protocol: int):
+        family = ['inet', 'inet4'] if 4 == protocol else ['inet6']
         for dev, configs in self.get_lxc().state().network.items():
-            self.ips[dev] = [c['address'] for c in filter(lambda c: 'inet' == c['family'], configs['addresses'])][0]
-        return self.ips[device]
+            k = f'{dev}:{protocol}'
+            self.ips[k] = [c['address'] for c in filter(lambda c: c['family'] in family, configs['addresses'])][0]
+
+
+    def get_ip(self, protocol: int = 4, device: str = 'eth0') -> str:
+        if not self.ips:
+            self.ips = {}
+            self.parse_devices(4)
+            self.parse_devices(6)
+
+        key = f'{device}:{protocol}'
+        if key not in self.ips:
+            raise Exception(f'Container {self.id} has no device {device}')
+        return self.ips[key] if 4 == protocol else f'[{self.ips[key]}]'
 
     def get_lxc(self) -> LxdContainer:
         if not self.lxc:
@@ -487,7 +503,6 @@ class Container:
             self.get_lxc().files.put(target, content.read(), mode=0o777)
             self.exec(f'sudo chown {self.user}:{self.user} {target}')
             content.close()
-
 
 
 class SpecialAction:
@@ -687,7 +702,7 @@ def main():
     loader = ContainerLoader(os.path.abspath(args.config), Client(),
                              output=args.output in ['actions', 'both'], log=args.output in ['log', 'both'])
     container = loader.get(args.container)
-    os.chdir(os.path.expanduser('~')) # We move to user home so avoid execution problems
+    os.chdir(os.path.expanduser('~'))  # We move to user home so avoid execution problems
 
     try:
         if 'create' == args.verb:
